@@ -1,139 +1,70 @@
-#Imports
-import argparse
+import sys
 import os
-from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from dotenv import load_dotenv
 
-#System prompt
-system_prompt = """
-You are a helpful AI coding agent.
+from prompts import system_prompt
+from call_function import call_function, available_functions
 
-When a user asks a question or makes a request, make a function call plan. You can perform the following operations:
 
-- List files and directories
-- Read file contents
-- Execute Python files with optional arguments
-- Write or overwrite files List files and directories
+def main():
+    load_dotenv()
 
-All paths you provide should be relative to the working directory. You do not need to specify the working directory in your function calls as it is automatically injected for security reasons.
-"""
+    verbose = "--verbose" in sys.argv
+    args = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
 
-#Connecting to the Gemini API
-load_dotenv()
-api_key = os.environ.get("GEMINI_API_KEY")
-client = genai.Client(api_key=api_key)
+    if not args:
+        print("AI Code Assistant")
+        print('\nUsage: python main.py "your prompt here" [--verbose]')
+        print('Example: python main.py "How do I fix the calculator?"')
+        sys.exit(1)
 
-#CLI args parser set-up / flow control
-parser = argparse.ArgumentParser()
-parser.add_argument("prompt", help= "Prompt text")
-parser.add_argument("--verbose", action= "store_true", help= "Verbose output")
-args = parser.parse_args()
+    api_key = os.environ.get("GEMINI_API_KEY")
+    client = genai.Client(api_key=api_key)
 
-if not args.prompt:
-    exit(1)
-elif args.verbose:
-    verbose = True
-    prompt = args.prompt
-else:
-    verbose = False
-    prompt = args.prompt
+    user_prompt = " ".join(args)
 
-#Setting up messages to send to model
-messages = [
-    types.Content(role="user", parts=[types.Part(text=prompt)]),
-]
+    if verbose:
+        print(f"User prompt: {user_prompt}\n")
 
-#Function calling schema
-schema_get_files_info = types.FunctionDeclaration(
-    name="get_files_info",
-    description="Lists files in the specified directory along with their sizes, constrained to the working directory.",
-    parameters=types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "directory": types.Schema(
-                type=types.Type.STRING,
-                description="The directory to list files from, relative to the working directory. If not provided, lists files in the working directory itself.",
-            ),
-        },
-    ),
-)
-
-schema_get_file_content = types.FunctionDeclaration(
-    name="get_file_content",
-    description="Read file contents, constrained to the working directory.",
-    parameters=types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "file_path": types.Schema(
-                type=types.Type.STRING,
-                description="The file path to the file to get the content of, relative to the working directory.",
-            ),
-        },
-    ),
-)
-
-schema_write_file = types.FunctionDeclaration(
-    name="write_file",
-    description="Writes content to a file at the specified file path replacing any existing file, constrained to the working directory.",
-    parameters=types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "file_path": types.Schema(
-                type=types.Type.STRING,
-                description="The file path to the file to be written, relative to the working directory.",
-            ),
-            "content" : types.Schema(
-                type=types.Type.STRING,
-                description="The content to be written to the file.",
-                ),
-        },
-    ),
-)
-
-schema_run_python_file = types.FunctionDeclaration(
-    name="run_python_file",
-    description="Runs a python file at a specified file path, constrained to the working directory.",
-    parameters=types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "file_path": types.Schema(
-                type=types.Type.STRING,
-                description="The file path to the python file to run, relative to the working directory.",
-            ),
-        },
-    ),
-)
-
-available_functions = types.Tool(
-    function_declarations=[
-        schema_get_files_info,
-        schema_get_file_content,
-        schema_write_file,
-        schema_run_python_file,
+    messages = [
+        types.Content(role="user", parts=[types.Part(text=user_prompt)]),
     ]
-)
 
-#Getting a response from the model
-response = client.models.generate_content(
-    model="gemini-2.0-flash-001",
-    contents=messages,
-    config=types.GenerateContentConfig(tools=[available_functions], system_instruction=system_prompt)
-)
+    generate_content(client, messages, verbose)
 
-#Usage statistics
-input_tokens = response.usage_metadata.prompt_token_count
-output_tokens = response.usage_metadata.candidates_token_count
 
-#Output logic / flow control
-if verbose == True:
-    print(f"User prompt: {prompt}\n")
-    print(f"Model output: {response.text}\n")
-    if response.function_calls:
-        print(f"Calling function: {response.function_calls[0].name}({response.function_calls[0].args})")
-    print(f"Prompt tokens: {input_tokens}\n")
-    print(f"Response tokens: {output_tokens}\n")
-else:
-    print(f"Model output: {response.text}\n")
-    if response.function_calls:
-        print(f"Calling function: {response.function_calls[0].name}({response.function_calls[0].args})")
+def generate_content(client, messages, verbose):
+    response = client.models.generate_content(
+        model="gemini-2.0-flash-001",
+        contents=messages,
+        config=types.GenerateContentConfig(
+            tools=[available_functions], system_instruction=system_prompt
+        ),
+    )
+    if verbose:
+        print("Prompt tokens:", response.usage_metadata.prompt_token_count)
+        print("Response tokens:", response.usage_metadata.candidates_token_count)
+
+    if not response.function_calls:
+        return response.text
+
+    function_responses = []
+    for function_call_part in response.function_calls:
+        function_call_result = call_function(function_call_part, verbose)
+        if (
+            not function_call_result.parts
+            or not function_call_result.parts[0].function_response
+        ):
+            raise Exception("empty function call result")
+        if verbose:
+            print(f"-> {function_call_result.parts[0].function_response.response}")
+        function_responses.append(function_call_result.parts[0])
+
+    if not function_responses:
+        raise Exception("no function responses generated, exiting.")
+
+
+if __name__ == "__main__":
+    main()
